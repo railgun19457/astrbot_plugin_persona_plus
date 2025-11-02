@@ -189,46 +189,22 @@ class PersonaPlus(Star):
         )
 
     async def _extract_persona_from_file(self, event: AstrMessageEvent) -> str | None:
-        """从消息中提取文件内容（支持 md/txt 格式）。"""
+        """从消息中提取文件内容（支持文本格式）。"""
         logger.debug(
             f"Persona+ 开始提取文件内容，消息链长度: {len(event.get_messages())}"
         )
         for component in event.get_messages():
             logger.debug(f"Persona+ 检查组件类型: {type(component).__name__}")
             if isinstance(component, Comp.File):
-                # 尝试多种方式获取文件名
-                file_name = getattr(component, "name", "")
+                logger.info("Persona+ 检测到文件组件，开始下载...")
 
-                # 如果 name 不是真实文件名，尝试从原始数据获取
-                if not file_name or file_name == "file":
-                    # 尝试访问 toDict 获取原始数据
-                    try:
-                        raw_data = component.toDict()
-                        if "data" in raw_data and "file" in raw_data["data"]:
-                            file_name = raw_data["data"]["file"]
-                    except Exception:
-                        pass
-
-                logger.info(f"Persona+ 检测到文件组件，文件名: {file_name}")
-                if not file_name or file_name == "file":
-                    logger.warning("Persona+ 无法获取真实文件名")
-                    continue
-
-                file_ext = Path(file_name).suffix.lower()
-                logger.debug(f"Persona+ 文件扩展名: {file_ext}")
-                if file_ext not in {".md", ".txt"}:
-                    raise ValueError(
-                        f"不支持的文件格式：{file_ext or '(无扩展名)'}。仅支持 .md 和 .txt 文件。"
-                    )
-
-                # 获取文件
-                logger.debug("Persona+ 开始下载文件...")
+                # 直接下载文件
                 file_path = await component.get_file()
                 if not file_path:
                     raise ValueError("文件下载失败，请重试。")
                 logger.info(f"Persona+ 文件已下载到: {file_path}")
 
-                # 读取文件内容
+                # 尝试读取文本内容
                 try:
                     async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
                         content = await f.read()
@@ -237,7 +213,9 @@ class PersonaPlus(Star):
                     logger.info(f"Persona+ 成功读取文件，内容长度: {len(content)} 字符")
                     return content.strip()
                 except UnicodeDecodeError:
-                    raise ValueError("文件编码错误，请确保文件为 UTF-8 编码。")
+                    raise ValueError(
+                        "文件不是有效的文本文件。请上传 UTF-8 编码的文本文件（如 .md 或 .txt）。"
+                    )
                 except Exception as exc:
                     logger.exception("读取文件时出错")
                     raise ValueError(f"读取文件失败：{exc}")
@@ -248,35 +226,18 @@ class PersonaPlus(Star):
     async def _cache_persona_file(
         self, event: AstrMessageEvent, persona_id: str
     ) -> Path | None:
-        """缓存人格文件到本地。"""
+        """缓存人格文件到本地，使用人格ID命名为 .txt 文件。"""
         for component in event.get_messages():
             if isinstance(component, Comp.File):
-                # 尝试多种方式获取文件名
-                file_name = getattr(component, "name", "")
-
-                # 如果 name 不是真实文件名，尝试从原始数据获取
-                if not file_name or file_name == "file":
-                    try:
-                        raw_data = component.toDict()
-                        if "data" in raw_data and "file" in raw_data["data"]:
-                            file_name = raw_data["data"]["file"]
-                    except Exception:
-                        pass
-
-                if not file_name or file_name == "file":
-                    continue
-
-                src_ext = Path(file_name).suffix.lower()
-                if src_ext not in {".md", ".txt"}:
-                    continue
-
+                logger.debug("Persona+ 开始缓存文件...")
                 # 获取文件路径
                 file_path = await component.get_file()
                 if not file_path:
+                    logger.warning("Persona+ 文件下载失败，跳过缓存")
                     continue
 
-                # 保存到插件数据目录，使用原始扩展名
-                dest_path = self.persona_files_dir / f"{persona_id}{src_ext}"
+                # 统一保存为 .txt 格式，使用人格ID命名
+                dest_path = self.persona_files_dir / f"{persona_id}.txt"
                 try:
                     async with aiofiles.open(file_path, "rb") as src_f:
                         content = await src_f.read()
@@ -286,20 +247,19 @@ class PersonaPlus(Star):
                     return dest_path
                 except Exception as exc:
                     logger.exception("缓存文件时出错")
-                    raise ValueError(f"缓存文件失败：{exc}")
+                    logger.warning(f"Persona+ 缓存文件失败：{exc}")
 
         return None
 
     def _delete_persona_file(self, persona_id: str) -> None:
         """删除指定人格的缓存文件。"""
-        for ext in [".md", ".txt"]:
-            file_path = self.persona_files_dir / f"{persona_id}{ext}"
-            if file_path.exists():
-                try:
-                    file_path.unlink()
-                    logger.info(f"Persona+ 已删除人格文件：{file_path}")
-                except Exception as exc:
-                    logger.warning(f"Persona+ 删除人格文件失败：{exc}")
+        file_path = self.persona_files_dir / f"{persona_id}.txt"
+        if file_path.exists():
+            try:
+                file_path.unlink()
+                logger.info(f"Persona+ 已删除人格文件：{file_path}")
+            except Exception as exc:
+                logger.warning(f"Persona+ 删除人格文件失败：{exc}")
 
     async def _create_persona(
         self,
@@ -499,13 +459,13 @@ class PersonaPlus(Star):
             "- /persona_plus help — 查看帮助与配置说明",
             "- /persona_plus list — 列出所有人格",
             "- /persona_plus view <persona_id> — 查看人格详情",
-            "- /persona_plus create <persona_id> — 创建新人格，随后发送纯文本或上传 md/txt 文件",
-            "- /persona_plus update <persona_id> — 更新人格，随后发送纯文本或上传 md/txt 文件",
+            "- /persona_plus create <persona_id> — 创建新人格，随后发送纯文本或上传文本文件",
+            "- /persona_plus update <persona_id> — 更新人格，随后发送纯文本或上传文本文件",
             "- /persona_plus avatar <persona_id> — 上传人格头像，随后发送图片",
             "- /persona_plus delete <persona_id> — 删除人格 (管理员)",
             "",
-            "提示：创建/更新人格时，可以直接发送文本或上传 .md/.txt 文件",
-            "文件将自动缓存到 data/plugin_data/astrbot_plugin_persona_plus/persona_files 目录",
+            "提示：创建/更新人格时，可以直接发送文本或上传文本文件（任意扩展名）",
+            "文件会自动缓存到 data/plugin_data/astrbot_plugin_persona_plus/persona_files/{persona_id}.txt",
         ]
         yield event.plain_result("\n".join(sections))
 
@@ -611,7 +571,7 @@ class PersonaPlus(Star):
             return
 
         yield event.plain_result(
-            "请发送人格内容（可以直接发送文本，或上传 md/txt 文件）"
+            "请发送人格内容（可以直接发送文本，或上传文本文件）"
         )
 
         @session_waiter(timeout=self.manage_wait_timeout)
@@ -717,7 +677,7 @@ class PersonaPlus(Star):
             return
 
         yield event.plain_result(
-            "请发送新的人格内容（可以直接发送文本，或上传 md/txt 文件）"
+            "请发送新的人格内容（可以直接发送文本，或上传文本文件）"
         )
 
         @session_waiter(timeout=self.manage_wait_timeout)
