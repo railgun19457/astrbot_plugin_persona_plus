@@ -196,11 +196,22 @@ class PersonaPlus(Star):
         for component in event.get_messages():
             logger.debug(f"Persona+ 检查组件类型: {type(component).__name__}")
             if isinstance(component, Comp.File):
-                # 首先检查文件名扩展名
+                # 尝试多种方式获取文件名
                 file_name = getattr(component, "name", "")
+
+                # 如果 name 不是真实文件名，尝试从原始数据获取
+                if not file_name or file_name == "file":
+                    # 尝试访问 toDict 获取原始数据
+                    try:
+                        raw_data = component.toDict()
+                        if "data" in raw_data and "file" in raw_data["data"]:
+                            file_name = raw_data["data"]["file"]
+                    except Exception:
+                        pass
+
                 logger.info(f"Persona+ 检测到文件组件，文件名: {file_name}")
-                if not file_name:
-                    logger.warning("Persona+ 文件组件没有 name 属性")
+                if not file_name or file_name == "file":
+                    logger.warning("Persona+ 无法获取真实文件名")
                     continue
 
                 file_ext = Path(file_name).suffix.lower()
@@ -240,9 +251,19 @@ class PersonaPlus(Star):
         """缓存人格文件到本地。"""
         for component in event.get_messages():
             if isinstance(component, Comp.File):
-                # 获取原始文件名
+                # 尝试多种方式获取文件名
                 file_name = getattr(component, "name", "")
-                if not file_name:
+
+                # 如果 name 不是真实文件名，尝试从原始数据获取
+                if not file_name or file_name == "file":
+                    try:
+                        raw_data = component.toDict()
+                        if "data" in raw_data and "file" in raw_data["data"]:
+                            file_name = raw_data["data"]["file"]
+                    except Exception:
+                        pass
+
+                if not file_name or file_name == "file":
                     continue
 
                 src_ext = Path(file_name).suffix.lower()
