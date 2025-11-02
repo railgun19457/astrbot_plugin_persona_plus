@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from pathlib import Path
-
-import aiofiles
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
@@ -12,8 +9,6 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.persona_mgr import PersonaManager
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
-from astrbot.core.star.star_tools import StarTools
-import astrbot.api.message_components as Comp
 from .qq_profile_sync import QQProfileSync
 
 
@@ -48,12 +43,6 @@ class PersonaPlus(Star):
         self.auto_switch_announce: bool = False
         self.clear_context_on_switch: bool = False
         self.qq_sync = QQProfileSync(context)
-
-        # 初始化插件数据目录
-        self.data_dir: Path = StarTools.get_data_dir("astrbot_plugin_persona_plus")
-        self.persona_files_dir: Path = self.data_dir / "persona_files"
-        self.persona_files_dir.mkdir(parents=True, exist_ok=True)
-
         self._load_config()
 
     def _load_config(self) -> None:
@@ -174,110 +163,12 @@ class PersonaPlus(Star):
         return raw_text, []
 
     async def _extract_persona_from_event(self, event: AstrMessageEvent) -> str:
-        """从消息链中提取文本内容或文件内容。"""
-        # 先尝试从文件中提取
-        file_content = await self._extract_persona_from_file(event)
-        if file_content:
-            return file_content
+        """从消息链中提取文本内容。"""
 
-        # 如果没有文件，则使用纯文本
         text = event.message_str.strip()
         if text:
             return text
-        raise ValueError(
-            "未检测到可解析的文本内容或文件。请发送文本或上传 md/txt 文件。"
-        )
-
-    async def _extract_persona_from_file(self, event: AstrMessageEvent) -> str | None:
-        """从消息中提取文件内容（支持文本格式）。"""
-        logger.debug(
-            f"Persona+ 开始提取文件内容，消息链长度: {len(event.get_messages())}"
-        )
-        for component in event.get_messages():
-            logger.debug(f"Persona+ 检查组件类型: {type(component).__name__}")
-            if isinstance(component, Comp.File):
-                logger.info("Persona+ 检测到文件组件，开始下载...")
-
-                # 直接下载文件
-                file_path = await component.get_file()
-                if not file_path:
-                    raise ValueError("文件下载失败，请重试。")
-                logger.info(f"Persona+ 文件已下载到: {file_path}")
-
-                # 尝试多种编码读取文本内容
-                encodings = ["utf-8", "gbk", "gb2312", "utf-16", "latin-1"]
-                content = None
-                used_encoding = None
-
-                for encoding in encodings:
-                    try:
-                        async with aiofiles.open(
-                            file_path, "r", encoding=encoding
-                        ) as f:
-                            content = await f.read()
-                        if content.strip():
-                            used_encoding = encoding
-                            logger.info(
-                                f"Persona+ 使用 {encoding} 编码成功读取文件，内容长度: {len(content)} 字符"
-                            )
-                            break
-                    except (UnicodeDecodeError, UnicodeError):
-                        logger.debug(f"Persona+ 尝试 {encoding} 编码失败")
-                        continue
-                    except Exception as exc:
-                        logger.debug(f"Persona+ 使用 {encoding} 编码时出错: {exc}")
-                        continue
-
-                if content and content.strip():
-                    return content.strip()
-                elif content is not None:
-                    raise ValueError("文件内容为空，请检查文件。")
-                else:
-                    raise ValueError(
-                        f"无法读取文件内容。尝试了以下编码: {', '.join(encodings)}。"
-                        "请确保文件是文本文件。"
-                    )
-
-        logger.debug("Persona+ 未找到文件组件")
-        return None
-
-    async def _cache_persona_file(
-        self, event: AstrMessageEvent, persona_id: str
-    ) -> Path | None:
-        """缓存人格文件到本地，使用人格ID命名为 .txt 文件。"""
-        for component in event.get_messages():
-            if isinstance(component, Comp.File):
-                logger.debug("Persona+ 开始缓存文件...")
-                # 获取文件路径
-                file_path = await component.get_file()
-                if not file_path:
-                    logger.warning("Persona+ 文件下载失败，跳过缓存")
-                    continue
-
-                # 统一保存为 .txt 格式，使用人格ID命名
-                dest_path = self.persona_files_dir / f"{persona_id}.txt"
-                try:
-                    async with aiofiles.open(file_path, "rb") as src_f:
-                        content = await src_f.read()
-                    async with aiofiles.open(dest_path, "wb") as dest_f:
-                        await dest_f.write(content)
-                    logger.info(f"Persona+ 已缓存人格文件：{dest_path}")
-                    return dest_path
-                except Exception as exc:
-                    logger.exception("缓存文件时出错")
-                    logger.warning(f"Persona+ 缓存文件失败：{exc}")
-
-        return None
-
-    def _delete_persona_file(self, persona_id: str) -> None:
-        """删除指定人格的缓存文件。"""
-        file_path = self.persona_files_dir / f"{persona_id}.txt"
-        if file_path.exists():
-            try:
-                file_path.unlink()
-                logger.info(f"Persona+ 已删除人格文件：{file_path}")
-            except Exception as exc:
-                logger.warning(f"Persona+ 删除人格文件失败：{exc}")
+        raise ValueError("未检测到可解析的文本内容。请直接发送人格文本。")
 
     async def _create_persona(
         self,
@@ -365,7 +256,7 @@ class PersonaPlus(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_quick_switch_command(self, event: AstrMessageEvent):
-        """支持 `/pp <persona_id>` 的快捷切换"""
+        """支持 `/pp <persona_id>` 的快捷切换 """
 
         if not event.is_at_or_wake_command:
             return
@@ -477,13 +368,10 @@ class PersonaPlus(Star):
             "- /persona_plus help — 查看帮助与配置说明",
             "- /persona_plus list — 列出所有人格",
             "- /persona_plus view <persona_id> — 查看人格详情",
-            "- /persona_plus create <persona_id> — 创建新人格，随后发送纯文本或上传文本文件",
-            "- /persona_plus update <persona_id> — 更新人格，随后发送纯文本或上传文本文件",
+            "- /persona_plus create <persona_id> — 创建新人格，随后发送纯文本内容(不要上传文件)",
+            "- /persona_plus update <persona_id> — 更新人格，随后发送纯文本内容(不要上传文件)",
             "- /persona_plus avatar <persona_id> — 上传人格头像，随后发送图片",
-            "- /persona_plus delete <persona_id> — 删除人格 (管理员)",
-            "",
-            "提示：创建/更新人格时，可以直接发送文本或上传文本文件（任意扩展名）",
-            "文件会自动缓存到 data/plugin_data/astrbot_plugin_persona_plus/persona_files/{persona_id}.txt",
+            "- /persona_plus delete <persona_id> — 删除人格 (管理员)"
         ]
         yield event.plain_result("\n".join(sections))
 
@@ -562,12 +450,7 @@ class PersonaPlus(Star):
             yield event.plain_result(str(exc))
             return
 
-        # 删除头像缓存
         self.qq_sync.delete_avatar(persona_id)
-
-        # 删除人格文件缓存
-        self._delete_persona_file(persona_id)
-
         yield event.plain_result(f"人格 {persona_id} 已删除。")
 
     @persona_plus.command("create")
@@ -588,7 +471,7 @@ class PersonaPlus(Star):
             )
             return
 
-        yield event.plain_result("请发送人格内容（可以直接发送文本，或上传文本文件）")
+        yield event.plain_result("请发送人格内容")
 
         @session_waiter(timeout=self.manage_wait_timeout)
         async def create_waiter(
@@ -603,8 +486,6 @@ class PersonaPlus(Star):
                     begin_dialogs=begin_dialogs,
                     tools=None,
                 )
-                # 缓存文件
-                await self._cache_persona_file(next_event, persona_id)
             except ValueError as exc:
                 await next_event.send(next_event.plain_result(f"创建失败：{exc}"))
             except Exception as exc:  # noqa: BLE001
@@ -693,7 +574,7 @@ class PersonaPlus(Star):
             return
 
         yield event.plain_result(
-            "请发送新的人格内容（可以直接发送文本，或上传文本文件）"
+            "请发送新的人格内容"
         )
 
         @session_waiter(timeout=self.manage_wait_timeout)
@@ -708,8 +589,6 @@ class PersonaPlus(Star):
                     system_prompt=system_prompt,
                     begin_dialogs=begin_dialogs if begin_dialogs else None,
                 )
-                # 缓存文件（会覆盖旧文件）
-                await self._cache_persona_file(next_event, persona_id)
             except ValueError as exc:
                 await next_event.send(next_event.plain_result(f"更新失败：{exc}"))
             except Exception as exc:  # noqa: BLE001
