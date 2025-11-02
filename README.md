@@ -26,10 +26,10 @@
   - 查看指定人格的 System Prompt、预设对话与工具配置
 
 - `/persona_plus create <persona_id>`
-  - 创建新人格。发送此命令后，请直接在聊天中发送要作为 System Prompt 的纯文本
+  - 创建新人格。发送此命令后，请直接在聊天中发送要作为 System Prompt 的文本，或者文本文件(推荐md/txt)
 
 - `/persona_plus update <persona_id>`
-  - 更新现有人格。发送此命令后，请直接在聊天中发送新的纯文本 System Prompt
+  - 更新现有人格。发送此命令后，请直接在聊天中发送新的文本 System Prompt，或者文本文件(推荐md/txt)
 
 - `/persona_plus avatar <persona_id>`
   - 上传或更新人格头像。发送此命令后，请在聊天中发送图片，插件会保存头像并在配置允许时尝试同步到 QQ
@@ -89,7 +89,10 @@
 
 ### 更新日志
 #### ToDo
-  - [ ] 从文件解析人设
+  - [x] 从文件解析人设
+  
+#### v1.2
+  - 从文本文件解析人设
   
 #### v1.1
   - 添加插件logo

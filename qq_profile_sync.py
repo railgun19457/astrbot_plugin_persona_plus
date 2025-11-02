@@ -75,6 +75,7 @@ class QQProfileSync:
                     raise RuntimeError(f"下载头像失败，状态码 {resp.status}")
                 async with aiofiles.open(save_path, "wb") as f:
                     await f.write(await resp.read())
+        logger.debug("Persona+ 已下载头像至 %s", save_path)
 
     def extract_image_component(
         self, event: AstrMessageEvent
@@ -131,6 +132,7 @@ class QQProfileSync:
         avatar_path = self.get_avatar_path(persona_id)
         if avatar_path.exists():
             avatar_path.unlink()
+            logger.info("Persona+ 已删除人格 %s 的头像", persona_id)
         self.reset_persona_cache(persona_id)
 
     async def maybe_sync_profile(
@@ -165,25 +167,17 @@ class QQProfileSync:
             # 根据模式决定同步策略
             if self.nickname_sync_mode == "profile":
                 # 只修改 QQ 昵称
-                nickname_applied = await self._sync_qq_profile(
-                    event, nickname
-                )
+                nickname_applied = await self._sync_qq_profile(event, nickname)
             elif self.nickname_sync_mode == "group_card":
                 # 群聊中只修改群名片，私聊不修改
                 if is_group:
-                    nickname_applied = await self._sync_group_card(
-                        event, nickname
-                    )
+                    nickname_applied = await self._sync_group_card(event, nickname)
             elif self.nickname_sync_mode == "hybrid":
                 # 群聊中修改群名片，私聊中修改 QQ 昵称
                 if is_group:
-                    nickname_applied = await self._sync_group_card(
-                        event, nickname
-                    )
+                    nickname_applied = await self._sync_group_card(event, nickname)
                 else:
-                    nickname_applied = await self._sync_qq_profile(
-                        event, nickname
-                    )
+                    nickname_applied = await self._sync_qq_profile(event, nickname)
 
         if sync_avatar:
             avatar_path = self.get_avatar_path(persona_id)
@@ -199,7 +193,7 @@ class QQProfileSync:
                     logger.warning(
                         "Persona+ 当前适配器未实现 set_qq_avatar 接口，跳过头像同步。"
                     )
-            elif not nickname_applied:
+            else:
                 logger.debug(
                     "Persona+ 未找到人格 %s 的头像缓存，跳过头像同步", persona_id
                 )
@@ -224,9 +218,7 @@ class QQProfileSync:
             )
         return False
 
-    async def _sync_group_card(
-        self, event: AiocqhttpMessageEvent, card: str
-    ) -> bool:
+    async def _sync_group_card(self, event: AiocqhttpMessageEvent, card: str) -> bool:
         """同步群名片"""
         group_id = event.get_group_id()
         if not group_id:
@@ -241,9 +233,7 @@ class QQProfileSync:
                     user_id=int(user_id),
                     card=card,
                 )
-                logger.debug(
-                    "Persona+ 已同步群名片为 %s (群 %s)", card, group_id
-                )
+                logger.debug("Persona+ 已同步群名片为 %s (群 %s)", card, group_id)
                 return True
             except Exception as exc:  # noqa: BLE001
                 logger.error("Persona+ 同步群名片失败：%s", exc)

@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 
+import aiofiles
+
+import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.persona_mgr import PersonaManager
+from astrbot.core.star.star_tools import StarTools
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
+
 from .qq_profile_sync import QQProfileSync
 
 
@@ -26,7 +32,7 @@ class KeywordMapping:
     "persona_plus",
     "Railgun",
     "扩展 AstrBot 的人格管理能力，提供人格管理(包括创建、删除、更新等功能)、关键词自动切换、快速切换人格、以及与 QQ 头像/昵称的同步修改。",
-    "1.1",
+    "1.2",
     "https://github.com/railgun19457/astrbot_plugin_persona_plus",
 )
 class PersonaPlus(Star):
@@ -43,6 +49,11 @@ class PersonaPlus(Star):
         self.auto_switch_announce: bool = False
         self.clear_context_on_switch: bool = False
         self.qq_sync = QQProfileSync(context)
+        # 初始化人格数据目录
+        self.persona_data_dir: Path = (
+            StarTools.get_data_dir("astrbot_plugin_persona_plus") / "persona_files"
+        )
+        self.persona_data_dir.mkdir(parents=True, exist_ok=True)
         self._load_config()
 
     def _load_config(self) -> None:
@@ -142,15 +153,7 @@ class PersonaPlus(Star):
         if not persona_id:
             raise ValueError(f"无效的人格 ID：{entry!r}。")
 
-        keyword_part = left.strip()
-        keyword = keyword_part
-        if "|" in keyword_part:
-            _, keyword_raw = keyword_part.split("|", 1)
-            keyword = keyword_raw.strip()
-            logger.warning(
-                "Persona+ 已忽略匹配模式配置，按包含匹配处理：%s",
-                entry,
-            )
+        keyword = left.strip()
 
         if not keyword:
             raise ValueError(f"无效的关键词内容：{entry!r}。")
@@ -162,13 +165,140 @@ class PersonaPlus(Star):
         """将用户传入的全部文本作为 system_prompt"""
         return raw_text, []
 
-    async def _extract_persona_from_event(self, event: AstrMessageEvent) -> str:
-        """从消息链中提取文本内容。"""
+    async def _download_and_parse_persona_file(
+        self, event: AstrMessageEvent, persona_id: str
+    ) -> str:
+        """从消息中提取文件/图片组件，下载并解析为文本内容。
 
+        参考文件管理插件的处理方式，支持:
+        1. File 组件 (文本文件)
+        2. Image 组件 (可能包含 URL)
+
+        Args:
+            event: 消息事件
+            persona_id: 人格 ID，用于命名保存的文件
+
+        Returns:
+            解析出的文本内容
+
+        Raises:
+            ValueError: 未找到文件/无法解析
+        """
+        # 提取文件或图片组件
+        file_component = None
+        for component in event.get_messages():
+            if isinstance(component, (Comp.File, Comp.Image)):
+                file_component = component
+                break
+            # 检查 Reply 消息中是否有文件
+            if isinstance(component, Comp.Reply) and component.chain:
+                for reply_component in component.chain:
+                    if isinstance(reply_component, (Comp.File, Comp.Image)):
+                        file_component = reply_component
+                        break
+                if file_component:
+                    break
+
+        if not file_component:
+            raise ValueError("未检测到文件，请附带或引用一个文本文件。")
+
+        # 保存路径: persona_files/persona_id.txt
+        save_path = self.persona_data_dir / f"{persona_id}.txt"
+
+        # 处理 File 组件
+        if isinstance(file_component, Comp.File):
+            temp_path = await file_component.get_file()
+            if not temp_path:
+                raise ValueError("文件获取失败，请重新发送。")
+
+            src = Path(temp_path)
+
+            # 第一步：读取原始二进制数据
+            async with aiofiles.open(src, "rb") as src_fp:
+                raw_data = await src_fp.read()
+
+            if not raw_data:
+                raise ValueError("文件为空，无法创建人格。")
+
+            # 第二步：保存原始文件（二进制模式，保证不丢失数据）
+            async with aiofiles.open(save_path, "wb") as dest_fp:
+                await dest_fp.write(raw_data)
+
+            logger.info(
+                "Persona+ 已保存人格文件 %s 至 %s (大小: %d 字节)",
+                persona_id,
+                save_path,
+                len(raw_data),
+            )
+
+            # 第三步：尝试用多种编码解析二进制数据
+            content = None
+            encodings = ["utf-8", "gbk"]
+            errors = []
+
+            for encoding in encodings:
+                try:
+                    content = raw_data.decode(encoding)
+                    logger.debug("Persona+ 使用 %s 编码成功解析文件", encoding)
+                    break
+                except (UnicodeDecodeError, LookupError) as e:
+                    errors.append(f"{encoding}: {str(e)}")
+                    continue
+
+            if content is None:
+                error_detail = "; ".join(errors)
+                raise ValueError(
+                    f"文件编码不支持（尝试了 UTF-8 和 GBK）。"
+                    f"文件已保存至 {save_path}，请检查文件编码。错误详情: {error_detail}"
+                )
+
+            return content.strip()
+
+        # 如果执行到这里，说明不是 File 组件
+        raise ValueError(
+            "检测到非文本文件消息。如需上传人格，请发送文本文件(.txt/.md等)。"
+        )
+
+    async def _extract_persona_from_event(
+        self, event: AstrMessageEvent, persona_id: str
+    ) -> str:
+        """从消息链中提取文本内容或文件内容。
+
+        支持两种方式:
+        1. 直接发送文本消息
+        2. 发送文本文件 (推荐用于长人格)
+
+        Args:
+            event: 消息事件
+            persona_id: 人格 ID，用于文件命名
+
+        Returns:
+            人格文本内容
+        """
+        # 先检查是否有文件组件
+        has_file = False
+        for component in event.get_messages():
+            if isinstance(component, Comp.File):
+                has_file = True
+                break
+            if isinstance(component, Comp.Reply) and component.chain:
+                for reply_component in component.chain:
+                    if isinstance(reply_component, Comp.File):
+                        has_file = True
+                        break
+                if has_file:
+                    break
+
+        # 如果有文件，优先使用文件
+        if has_file:
+            return await self._download_and_parse_persona_file(event, persona_id)
+
+        # 否则使用文本内容
         text = event.message_str.strip()
         if text:
             return text
-        raise ValueError("未检测到可解析的文本内容。请直接发送人格文本。")
+
+        raise ValueError("未检测到可解析的文本内容。请直接发送人格文本或上传文本文件。")
 
     async def _create_persona(
         self,
@@ -192,7 +322,7 @@ class PersonaPlus(Star):
                 begin_dialogs=begin_dialogs if begin_dialogs else None,
                 tools=tools,
             )
-            return
+            logger.info("Persona+ 已创建人格 %s", persona_id)
 
     async def _switch_persona(
         self,
@@ -214,20 +344,32 @@ class PersonaPlus(Star):
                     unified_msg_origin=umo,
                     persona_id=persona_id,
                 )
+                logger.info(
+                    "Persona+ 已为新会话设置人格 %s (scope=%s)", persona_id, scope
+                )
             else:
                 await self._update_current_conversation(umo, persona_id, history_reset)
+                logger.info(
+                    "Persona+ 已切换会话人格至 %s (scope=%s)", persona_id, scope
+                )
         elif scope == "session":
             config = self.context.astrbot_config_mgr.get_conf(umo)
             if config:
                 provider_settings = config.setdefault("provider_settings", {})
                 provider_settings["default_personality"] = persona_id
                 config.save_config()
+                logger.info(
+                    "Persona+ 已更新会话配置默认人格至 %s (scope=%s)", persona_id, scope
+                )
             await self._update_current_conversation(umo, persona_id, history_reset)
         elif scope == "global":
             config = self.context.astrbot_config_mgr.default_conf
             provider_settings = config.setdefault("provider_settings", {})
             provider_settings["default_personality"] = persona_id
             config.save_config()
+            logger.info(
+                "Persona+ 已更新全局配置默认人格至 %s (scope=%s)", persona_id, scope
+            )
             await self._update_current_conversation(umo, persona_id, history_reset)
 
         await self.qq_sync.maybe_sync_profile(event, persona_id)
@@ -256,7 +398,7 @@ class PersonaPlus(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_quick_switch_command(self, event: AstrMessageEvent):
-        """支持 `/pp <persona_id>` 的快捷切换 """
+        """支持 `/pp <persona_id>` 的快捷切换"""
 
         if not event.is_at_or_wake_command:
             return
@@ -368,10 +510,12 @@ class PersonaPlus(Star):
             "- /persona_plus help — 查看帮助与配置说明",
             "- /persona_plus list — 列出所有人格",
             "- /persona_plus view <persona_id> — 查看人格详情",
-            "- /persona_plus create <persona_id> — 创建新人格，随后发送纯文本内容(不要上传文件)",
-            "- /persona_plus update <persona_id> — 更新人格，随后发送纯文本内容(不要上传文件)",
+            "- /persona_plus create <persona_id> — 创建新人格，随后发送文本内容或上传文本文件",
+            "- /persona_plus update <persona_id> — 更新人格，随后发送文本内容或上传文本文件",
             "- /persona_plus avatar <persona_id> — 上传人格头像，随后发送图片",
-            "- /persona_plus delete <persona_id> — 删除人格 (管理员)"
+            "- /persona_plus delete <persona_id> — 删除人格 (管理员)",
+            "",
+            "提示：创建/更新人格时，可以直接发送文本，或上传 .txt/.md 等文本文件。",
         ]
         yield event.plain_result("\n".join(sections))
 
@@ -471,14 +615,16 @@ class PersonaPlus(Star):
             )
             return
 
-        yield event.plain_result("请发送人格内容")
+        yield event.plain_result("请发送人格内容(文本消息或文本文件)")
 
         @session_waiter(timeout=self.manage_wait_timeout)
         async def create_waiter(
             controller: SessionController, next_event: AstrMessageEvent
         ) -> None:
             try:
-                raw_text = await self._extract_persona_from_event(next_event)
+                raw_text = await self._extract_persona_from_event(
+                    next_event, persona_id
+                )
                 system_prompt, begin_dialogs = self._parse_persona_payload(raw_text)
                 await self._create_persona(
                     persona_id=persona_id,
@@ -573,16 +719,16 @@ class PersonaPlus(Star):
             yield event.plain_result(f"未找到人格 {persona_id}，请先创建该人格。")
             return
 
-        yield event.plain_result(
-            "请发送新的人格内容"
-        )
+        yield event.plain_result("请发送新的人格内容(文本消息或文本文件)")
 
         @session_waiter(timeout=self.manage_wait_timeout)
         async def update_waiter(
             controller: SessionController, next_event: AstrMessageEvent
         ) -> None:
             try:
-                raw_text = await self._extract_persona_from_event(next_event)
+                raw_text = await self._extract_persona_from_event(
+                    next_event, persona_id
+                )
                 system_prompt, begin_dialogs = self._parse_persona_payload(raw_text)
                 await self.persona_mgr.update_persona(
                     persona_id=persona_id,

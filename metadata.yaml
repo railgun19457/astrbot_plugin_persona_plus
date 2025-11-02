@@ -1,5 +1,6 @@
 name: astrbot_plugin_persona_plus
+display_name: Persona Plus
 desc: 扩展 AstrBot 的人格管理能力，提供人格管理(包括创建、删除、更新等功能)、关键词自动切换、快速切换人格、以及与 QQ 头像/昵称的同步修改。
-version: v1.1 
+version: v1.2 
 author: Railgun19457
 repo: https://github.com/railgun19457/astrbot_plugin_persona_plus
