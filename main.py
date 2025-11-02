@@ -192,17 +192,21 @@ class PersonaPlus(Star):
         """从消息中提取文件内容（支持 md/txt 格式）。"""
         for component in event.get_messages():
             if isinstance(component, Comp.File):
+                # 首先检查文件名扩展名
+                file_name = getattr(component, "name", "")
+                if not file_name:
+                    continue
+
+                file_ext = Path(file_name).suffix.lower()
+                if file_ext not in {".md", ".txt"}:
+                    raise ValueError(
+                        f"不支持的文件格式：{file_ext or '(无扩展名)'}。仅支持 .md 和 .txt 文件。"
+                    )
+
                 # 获取文件
                 file_path = await component.get_file()
                 if not file_path:
-                    continue
-
-                file_path_obj = Path(file_path)
-                # 检查文件扩展名
-                if file_path_obj.suffix.lower() not in {".md", ".txt"}:
-                    raise ValueError(
-                        f"不支持的文件格式：{file_path_obj.suffix}。仅支持 .md 和 .txt 文件。"
-                    )
+                    raise ValueError("文件下载失败，请重试。")
 
                 # 读取文件内容
                 try:
@@ -225,18 +229,24 @@ class PersonaPlus(Star):
         """缓存人格文件到本地。"""
         for component in event.get_messages():
             if isinstance(component, Comp.File):
+                # 获取原始文件名
+                file_name = getattr(component, "name", "")
+                if not file_name:
+                    continue
+
+                src_ext = Path(file_name).suffix.lower()
+                if src_ext not in {".md", ".txt"}:
+                    continue
+
+                # 获取文件路径
                 file_path = await component.get_file()
                 if not file_path:
                     continue
 
-                src_path = Path(file_path)
-                if src_path.suffix.lower() not in {".md", ".txt"}:
-                    continue
-
-                # 保存到插件数据目录
-                dest_path = self.persona_files_dir / f"{persona_id}{src_path.suffix}"
+                # 保存到插件数据目录，使用原始扩展名
+                dest_path = self.persona_files_dir / f"{persona_id}{src_ext}"
                 try:
-                    async with aiofiles.open(src_path, "rb") as src_f:
+                    async with aiofiles.open(file_path, "rb") as src_f:
                         content = await src_f.read()
                     async with aiofiles.open(dest_path, "wb") as dest_f:
                         await dest_f.write(content)
@@ -463,7 +473,7 @@ class PersonaPlus(Star):
             "- /persona_plus delete <persona_id> — 删除人格 (管理员)",
             "",
             "提示：创建/更新人格时，可以直接发送文本或上传 .md/.txt 文件",
-            "文件将自动缓存到 data/plugin_data/astrbot_plugin_persona_plus/persona_files 目录"
+            "文件将自动缓存到 data/plugin_data/astrbot_plugin_persona_plus/persona_files 目录",
         ]
         yield event.plain_result("\n".join(sections))
 
