@@ -204,21 +204,39 @@ class PersonaPlus(Star):
                     raise ValueError("文件下载失败，请重试。")
                 logger.info(f"Persona+ 文件已下载到: {file_path}")
 
-                # 尝试读取文本内容
-                try:
-                    async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
-                        content = await f.read()
-                    if not content.strip():
-                        raise ValueError("文件内容为空，请检查文件。")
-                    logger.info(f"Persona+ 成功读取文件，内容长度: {len(content)} 字符")
+                # 尝试多种编码读取文本内容
+                encodings = ["utf-8", "gbk", "gb2312", "utf-16", "latin-1"]
+                content = None
+                used_encoding = None
+
+                for encoding in encodings:
+                    try:
+                        async with aiofiles.open(
+                            file_path, "r", encoding=encoding
+                        ) as f:
+                            content = await f.read()
+                        if content.strip():
+                            used_encoding = encoding
+                            logger.info(
+                                f"Persona+ 使用 {encoding} 编码成功读取文件，内容长度: {len(content)} 字符"
+                            )
+                            break
+                    except (UnicodeDecodeError, UnicodeError):
+                        logger.debug(f"Persona+ 尝试 {encoding} 编码失败")
+                        continue
+                    except Exception as exc:
+                        logger.debug(f"Persona+ 使用 {encoding} 编码时出错: {exc}")
+                        continue
+
+                if content and content.strip():
                     return content.strip()
-                except UnicodeDecodeError:
+                elif content is not None:
+                    raise ValueError("文件内容为空，请检查文件。")
+                else:
                     raise ValueError(
-                        "文件不是有效的文本文件。请上传 UTF-8 编码的文本文件（如 .md 或 .txt）。"
+                        f"无法读取文件内容。尝试了以下编码: {', '.join(encodings)}。"
+                        "请确保文件是文本文件。"
                     )
-                except Exception as exc:
-                    logger.exception("读取文件时出错")
-                    raise ValueError(f"读取文件失败：{exc}")
 
         logger.debug("Persona+ 未找到文件组件")
         return None
@@ -570,9 +588,7 @@ class PersonaPlus(Star):
             )
             return
 
-        yield event.plain_result(
-            "请发送人格内容（可以直接发送文本，或上传文本文件）"
-        )
+        yield event.plain_result("请发送人格内容（可以直接发送文本，或上传文本文件）")
 
         @session_waiter(timeout=self.manage_wait_timeout)
         async def create_waiter(
