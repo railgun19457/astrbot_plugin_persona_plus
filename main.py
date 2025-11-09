@@ -31,8 +31,8 @@ class KeywordMapping:
 @register(
     "persona_plus",
     "Railgun",
-    "扩展 AstrBot 的人格管理能力，提供人格管理(包括创建、删除、更新等功能)、关键词自动切换、快速切换人格、以及与 QQ 头像/昵称的同步修改。",
-    "1.2",
+    "提供指令管理人格(支持切换、创建、查看、更新、删除)、关键词自动切换、QQ头像/昵称的同步修改",
+    "1.3",
     "https://github.com/railgun19457/astrbot_plugin_persona_plus",
 )
 class PersonaPlus(Star):
@@ -45,7 +45,7 @@ class PersonaPlus(Star):
         self.auto_switch_scope: str = "conversation"
         self.keyword_switch_enabled: bool = True
         self.manage_wait_timeout: int = 120
-        self.require_admin_for_manage: bool = False
+        self.admin_commands: set[str] = {"create", "update", "delete"}
         self.auto_switch_announce: bool = False
         self.clear_context_on_switch: bool = False
         self.qq_sync = QQProfileSync(context)
@@ -55,6 +55,26 @@ class PersonaPlus(Star):
         )
         self.persona_data_dir.mkdir(parents=True, exist_ok=True)
         self._load_config()
+
+    # ==================== 通用小工具 ====================
+    @staticmethod
+    def _has_component_of_types(
+        event: AstrMessageEvent, types: tuple[type, ...]
+    ) -> bool:
+        """检查消息链以及引用回复链中是否包含指定类型的组件。
+
+        Args:
+            event: 消息事件
+            types: 组件类型元组，例如 (Comp.File,) 或 (Comp.Image, Comp.File)
+        """
+        for component in event.get_messages():
+            if isinstance(component, types):
+                return True
+            if isinstance(component, Comp.Reply) and component.chain:
+                for reply_component in component.chain:
+                    if isinstance(reply_component, types):
+                        return True
+        return False
 
     def _load_config(self) -> None:
         if not self.config:
@@ -91,9 +111,17 @@ class PersonaPlus(Star):
         self.keyword_switch_enabled = bool(
             self.config.get("enable_keyword_switching", True)
         )
-        self.require_admin_for_manage = bool(
-            self.config.get("require_admin_for_manage", False)
+        admin_commands_raw = self.config.get(
+            "admin_commands", ["create", "update", "delete"]
         )
+        if isinstance(admin_commands_raw, list):
+            self.admin_commands = {cmd.lower().strip() for cmd in admin_commands_raw}
+        else:
+            logger.warning(
+                "Persona+ admin_commands 配置应为列表，实际收到 %r，已使用默认值",
+                admin_commands_raw,
+            )
+            self.admin_commands = {"create", "update", "delete"}
         self.auto_switch_announce = bool(
             self.config.get("enable_auto_switch_announce", False)
         )
@@ -126,8 +154,8 @@ class PersonaPlus(Star):
             self.qq_sync.describe_settings(),
         )
         logger.info(
-            "Persona+ 管理权限配置：require_admin_for_manage=%s",
-            self.require_admin_for_manage,
+            "Persona+ 权限配置：admin_commands=%s",
+            sorted(self.admin_commands),
         )
         logger.info(
             "Persona+ 管理操作等待超时：manage_wait_timeout=%ss",
@@ -143,6 +171,37 @@ class PersonaPlus(Star):
         )
 
     # ==================== 工具函数 ====================
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        """检查用户是否是管理员。
+
+        检查发送者ID是否在配置文件的 admins_id 列表中
+        """
+        sender_id = str(event.get_sender_id())
+        default_conf = self.context.get_config()
+        admin_ids = {str(admin) for admin in default_conf.get("admins_id", [])}
+
+        return sender_id in admin_ids
+
+    def check_permission(
+        self, event: AstrMessageEvent, command: str
+    ) -> tuple[bool, str]:
+        """统一的权限检查函数。
+
+        Args:
+            event: 消息事件
+            command: 指令名称 (help, list, view, create, update, delete, avatar)
+
+        Returns:
+            (是否有权限, 错误提示信息)
+            - (True, "") - 有权限
+            - (False, "错误信息") - 无权限
+        """
+        # 检查指令是否需要管理员权限
+        if command in self.admin_commands and not self._is_admin(event):
+            return False, "此操作需要管理员权限。"
+
+        return True, ""
+
     @staticmethod
     def _parse_mapping_entry(entry: str) -> KeywordMapping:
         left, sep, right = entry.partition(":")
@@ -168,11 +227,7 @@ class PersonaPlus(Star):
     async def _download_and_parse_persona_file(
         self, event: AstrMessageEvent, persona_id: str
     ) -> str:
-        """从消息中提取文件/图片组件，下载并解析为文本内容。
-
-        参考文件管理插件的处理方式，支持:
-        1. File 组件 (文本文件)
-        2. Image 组件 (可能包含 URL)
+        """从消息中提取文本文件组件，下载并解析为文本内容（仅支持 File）。
 
         Args:
             event: 消息事件
@@ -184,80 +239,60 @@ class PersonaPlus(Star):
         Raises:
             ValueError: 未找到文件/无法解析
         """
-        # 提取文件或图片组件
-        file_component = None
-        for component in event.get_messages():
-            if isinstance(component, (Comp.File, Comp.Image)):
-                file_component = component
-                break
-            # 检查 Reply 消息中是否有文件
-            if isinstance(component, Comp.Reply) and component.chain:
-                for reply_component in component.chain:
-                    if isinstance(reply_component, (Comp.File, Comp.Image)):
-                        file_component = reply_component
-                        break
-                if file_component:
-                    break
-
-        if not file_component:
-            raise ValueError("未检测到文件，请附带或引用一个文本文件。")
+        # 统一使用 QQ 同步工具内的提取逻辑，避免重复实现
+        file_component = self.qq_sync.extract_image_component(event)
+        if not isinstance(file_component, Comp.File):
+            raise ValueError("未检测到文本文件，请附带或引用一个 .txt/.md 文件。")
 
         # 保存路径: persona_files/persona_id.txt
         save_path = self.persona_data_dir / f"{persona_id}.txt"
 
-        # 处理 File 组件
-        if isinstance(file_component, Comp.File):
-            temp_path = await file_component.get_file()
-            if not temp_path:
-                raise ValueError("文件获取失败，请重新发送。")
+        temp_path = await file_component.get_file()
+        if not temp_path:
+            raise ValueError("文件获取失败，请重新发送。")
 
-            src = Path(temp_path)
+        src = Path(temp_path)
 
-            # 第一步：读取原始二进制数据
-            async with aiofiles.open(src, "rb") as src_fp:
-                raw_data = await src_fp.read()
+        # 第一步：读取原始二进制数据
+        async with aiofiles.open(src, "rb") as src_fp:
+            raw_data = await src_fp.read()
 
-            if not raw_data:
-                raise ValueError("文件为空，无法创建人格。")
+        if not raw_data:
+            raise ValueError("文件为空，无法创建人格。")
 
-            # 第二步：保存原始文件（二进制模式，保证不丢失数据）
-            async with aiofiles.open(save_path, "wb") as dest_fp:
-                await dest_fp.write(raw_data)
+        # 第二步：保存原始文件（二进制模式，保证不丢失数据）
+        async with aiofiles.open(save_path, "wb") as dest_fp:
+            await dest_fp.write(raw_data)
 
-            logger.info(
-                "Persona+ 已保存人格文件 %s 至 %s (大小: %d 字节)",
-                persona_id,
-                save_path,
-                len(raw_data),
+        logger.info(
+            "Persona+ 已保存人格文件 %s 至 %s (大小: %d 字节)",
+            persona_id,
+            save_path,
+            len(raw_data),
+        )
+
+        # 第三步：尝试用多种编码解析二进制数据
+        content = None
+        encodings = ["utf-8", "gbk"]
+        errors = []
+
+        for encoding in encodings:
+            try:
+                content = raw_data.decode(encoding)
+                logger.debug("Persona+ 使用 %s 编码成功解析文件", encoding)
+                break
+            except (UnicodeDecodeError, LookupError) as e:
+                errors.append(f"{encoding}: {str(e)}")
+                continue
+
+        if content is None:
+            error_detail = "; ".join(errors)
+            raise ValueError(
+                f"文件编码不支持（尝试了 UTF-8 和 GBK）。"
+                f"文件已保存至 {save_path}，请检查文件编码。错误详情: {error_detail}"
             )
 
-            # 第三步：尝试用多种编码解析二进制数据
-            content = None
-            encodings = ["utf-8", "gbk"]
-            errors = []
-
-            for encoding in encodings:
-                try:
-                    content = raw_data.decode(encoding)
-                    logger.debug("Persona+ 使用 %s 编码成功解析文件", encoding)
-                    break
-                except (UnicodeDecodeError, LookupError) as e:
-                    errors.append(f"{encoding}: {str(e)}")
-                    continue
-
-            if content is None:
-                error_detail = "; ".join(errors)
-                raise ValueError(
-                    f"文件编码不支持（尝试了 UTF-8 和 GBK）。"
-                    f"文件已保存至 {save_path}，请检查文件编码。错误详情: {error_detail}"
-                )
-
-            return content.strip()
-
-        # 如果执行到这里，说明不是 File 组件
-        raise ValueError(
-            "检测到非文本文件消息。如需上传人格，请发送文本文件(.txt/.md等)。"
-        )
+        return content.strip()
 
     async def _extract_persona_from_event(
         self, event: AstrMessageEvent, persona_id: str
@@ -276,18 +311,7 @@ class PersonaPlus(Star):
             人格文本内容
         """
         # 先检查是否有文件组件
-        has_file = False
-        for component in event.get_messages():
-            if isinstance(component, Comp.File):
-                has_file = True
-                break
-            if isinstance(component, Comp.Reply) and component.chain:
-                for reply_component in component.chain:
-                    if isinstance(reply_component, Comp.File):
-                        has_file = True
-                        break
-                if has_file:
-                    break
+        has_file = self._has_component_of_types(event, (Comp.File,))
 
         # 如果有文件，优先使用文件
         if has_file:
@@ -299,6 +323,97 @@ class PersonaPlus(Star):
             return text
 
         raise ValueError("未检测到可解析的文本内容。请直接发送人格文本或上传文本文件。")
+
+    def _schedule_persona_wait(
+        self, event: AstrMessageEvent, persona_id: str, mode: str
+    ) -> None:
+        """统一的后续消息等待与处理逻辑调度器。
+
+        支持的 mode: "create" | "update" | "avatar"。
+        """
+
+        # 定义每种模式的参数
+        if mode == "avatar":
+            accepted = (Comp.Image, Comp.File)
+            action_zh = "头像上传"
+        elif mode == "create":
+            accepted = (Comp.File,)
+            action_zh = "创建"
+        elif mode == "update":
+            accepted = (Comp.File,)
+            action_zh = "更新"
+        else:
+            logger.warning("Persona+ 未知的等待模式: %s", mode)
+            return
+
+        @session_waiter(timeout=self.manage_wait_timeout)
+        async def waiter(
+            controller: SessionController, next_event: AstrMessageEvent
+        ) -> None:
+            # 过滤掉空消息事件（如 QQ input_status 通知）
+            if not next_event.message_str.strip() and not self._has_component_of_types(
+                next_event, accepted
+            ):
+                logger.debug("Persona+ 已过滤空消息事件（可能是 input_status 通知）")
+                controller.keep(timeout=self.manage_wait_timeout, reset_timeout=True)
+                return
+
+            try:
+                if mode == "avatar":
+                    await self.qq_sync.save_avatar_from_event(next_event, persona_id)
+                    self.qq_sync.reset_persona_cache(persona_id)
+                else:
+                    raw_text = await self._extract_persona_from_event(
+                        next_event, persona_id
+                    )
+                    system_prompt, begin_dialogs = self._parse_persona_payload(raw_text)
+                    if mode == "create":
+                        await self._create_persona(
+                            persona_id=persona_id,
+                            system_prompt=system_prompt,
+                            begin_dialogs=begin_dialogs,
+                            tools=None,
+                        )
+                    else:  # update
+                        await self.persona_mgr.update_persona(
+                            persona_id=persona_id,
+                            system_prompt=system_prompt,
+                            begin_dialogs=begin_dialogs if begin_dialogs else None,
+                        )
+            except ValueError as exc:
+                await next_event.send(
+                    next_event.plain_result(f"{action_zh}失败：{exc}")
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("%s人格时出现异常", action_zh)
+                await next_event.send(
+                    next_event.plain_result(f"{action_zh}失败：{exc}")
+                )
+            else:
+                suffix = "头像上传成功。" if mode == "avatar" else f"{action_zh}成功。"
+                await next_event.send(
+                    next_event.plain_result(f"人格 {persona_id} {suffix}")
+                )
+            finally:
+                controller.stop()
+
+        async def run_wait() -> None:
+            try:
+                await waiter(event)
+            except TimeoutError:
+                msg = (
+                    "等待头像图片超时，操作已取消。"
+                    if mode == "avatar"
+                    else "等待人格内容超时，操作已取消。"
+                )
+                await event.send(event.plain_result(msg))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("%s等待流程异常", action_zh)
+                await event.send(event.plain_result(f"{action_zh}流程异常：{exc}"))
+
+        asyncio.create_task(run_wait())
+        event.stop_event()
+        return
 
     async def _create_persona(
         self,
@@ -337,46 +452,47 @@ class PersonaPlus(Star):
         scope = self.auto_switch_scope
         history_reset = [] if self.clear_context_on_switch else None
 
+        # 根据范围应用默认人格设置
+        self._set_default_persona(scope, umo, persona_id)
+
+        # 始终尝试更新当前对话的人格（若有当前会话）
+        await self._update_current_conversation(umo, persona_id, history_reset)
+
+        # 记录日志
         if scope == "conversation":
-            cid = await self.context.conversation_manager.get_curr_conversation_id(umo)
-            if not cid:
-                await self.context.conversation_manager.new_conversation(
-                    unified_msg_origin=umo,
-                    persona_id=persona_id,
-                )
-                logger.info(
-                    "Persona+ 已为新会话设置人格 %s (scope=%s)", persona_id, scope
-                )
-            else:
-                await self._update_current_conversation(umo, persona_id, history_reset)
-                logger.info(
-                    "Persona+ 已切换会话人格至 %s (scope=%s)", persona_id, scope
-                )
-        elif scope == "session":
-            config = self.context.astrbot_config_mgr.get_conf(umo)
-            if config:
-                provider_settings = config.setdefault("provider_settings", {})
-                provider_settings["default_personality"] = persona_id
-                config.save_config()
-                logger.info(
-                    "Persona+ 已更新会话配置默认人格至 %s (scope=%s)", persona_id, scope
-                )
-            await self._update_current_conversation(umo, persona_id, history_reset)
-        elif scope == "global":
-            config = self.context.astrbot_config_mgr.default_conf
-            provider_settings = config.setdefault("provider_settings", {})
-            provider_settings["default_personality"] = persona_id
-            config.save_config()
+            logger.info("Persona+ 已切换会话人格至 %s (scope=%s)", persona_id, scope)
+        elif scope in {"session", "global"}:
             logger.info(
-                "Persona+ 已更新全局配置默认人格至 %s (scope=%s)", persona_id, scope
+                "Persona+ 已更新%s配置默认人格至 %s (scope=%s)",
+                "会话" if scope == "session" else "全局",
+                persona_id,
+                scope,
             )
-            await self._update_current_conversation(umo, persona_id, history_reset)
 
         await self.qq_sync.maybe_sync_profile(event, persona_id)
 
         if announce:
             return event.plain_result(announce)
         return None
+
+    def _set_default_persona(self, scope: str, umo: str, persona_id: str) -> None:
+        """在指定作用域内设置默认人格。
+
+        - conversation: 不修改配置，仅在当前会话生效（由上层逻辑处理）。
+        - session: 修改当前会话配置默认人格。
+        - global: 修改全局配置默认人格。
+        """
+        if scope == "session":
+            config = self.context.astrbot_config_mgr.get_conf(umo)
+            if config:
+                provider_settings = config.setdefault("provider_settings", {})
+                provider_settings["default_personality"] = persona_id
+                config.save_config()
+        elif scope == "global":
+            config = self.context.astrbot_config_mgr.default_conf
+            provider_settings = config.setdefault("provider_settings", {})
+            provider_settings["default_personality"] = persona_id
+            config.save_config()
 
     async def _update_current_conversation(
         self,
@@ -438,8 +554,10 @@ class PersonaPlus(Star):
             return
 
         # 验证权限与存在性
-        if not self._has_permission(event, manage_operation=False):
-            yield event.plain_result("此操作需要管理员权限。")
+        # 快速切换使用默认权限要求（不在 admin_commands 中）
+        has_perm, err_msg = self.check_permission(event, "switch")
+        if not has_perm:
+            yield event.plain_result(err_msg)
             return
 
         try:
@@ -459,37 +577,6 @@ class PersonaPlus(Star):
             yield result
             event.stop_event()
 
-    def _collect_admin_ids(self, umo: str | None) -> set[str]:
-        admin_ids: set[str] = set()
-        default_conf = self.context.get_config()
-        admin_ids.update(str(admin) for admin in default_conf.get("admins_id", []))
-        if umo:
-            scoped_conf = self.context.astrbot_config_mgr.get_conf(umo)
-            if scoped_conf:
-                admin_ids.update(
-                    str(admin) for admin in scoped_conf.get("admins_id", [])
-                )
-        return admin_ids
-
-    def _has_manage_permission(self, event: AstrMessageEvent) -> bool:
-        if event.is_admin():
-            return True
-        sender_id = str(event.get_sender_id())
-        admin_ids = self._collect_admin_ids(event.unified_msg_origin)
-        return sender_id in admin_ids
-
-    def _has_permission(
-        self,
-        event: AstrMessageEvent,
-        *,
-        manage_operation: bool,
-        force_admin: bool = False,
-    ) -> bool:
-        need_admin = force_admin or (manage_operation and self.require_admin_for_manage)
-        if not need_admin:
-            return True
-        return self._has_manage_permission(event)
-
     # ==================== 指令：人格管理 ====================
     @filter.command_group("persona_plus", alias={"pp", "persona+"})
     def persona_plus(self):
@@ -500,8 +587,9 @@ class PersonaPlus(Star):
     async def cmd_help(self, event: AstrMessageEvent):
         """展示 Persona+ 指令列表。"""
 
-        if not self._has_permission(event, manage_operation=False):
-            yield event.plain_result("此操作需要管理员权限。")
+        has_perm, err_msg = self.check_permission(event, "help")
+        if not has_perm:
+            yield event.plain_result(err_msg)
             return
 
         sections = [
@@ -523,8 +611,9 @@ class PersonaPlus(Star):
     async def cmd_list(self, event: AstrMessageEvent):
         """列出所有已注册人格。"""
 
-        if not self._has_permission(event, manage_operation=False):
-            yield event.plain_result("此操作需要管理员权限。")
+        has_perm, err_msg = self.check_permission(event, "list")
+        if not has_perm:
+            yield event.plain_result(err_msg)
             return
 
         personas = await self.persona_mgr.get_all_personas()
@@ -545,8 +634,9 @@ class PersonaPlus(Star):
     async def cmd_view(self, event: AstrMessageEvent, persona_id: str):
         """查看指定人格详情。"""
 
-        if not self._has_permission(event, manage_operation=False):
-            yield event.plain_result("此操作需要管理员权限。")
+        has_perm, err_msg = self.check_permission(event, "view")
+        if not has_perm:
+            yield event.plain_result(err_msg)
             return
 
         try:
@@ -582,10 +672,11 @@ class PersonaPlus(Star):
 
     @persona_plus.command("delete")
     async def cmd_delete(self, event: AstrMessageEvent, persona_id: str):
-        """删除指定人格(仅管理员)。"""
+        """删除指定人格。"""
 
-        if not self._has_permission(event, manage_operation=True, force_admin=True):
-            yield event.plain_result("此操作需要管理员权限。")
+        has_perm, err_msg = self.check_permission(event, "delete")
+        if not has_perm:
+            yield event.plain_result(err_msg)
             return
 
         try:
@@ -601,8 +692,9 @@ class PersonaPlus(Star):
     async def cmd_create(self, event: AstrMessageEvent, persona_id: str):
         """从文本或文件创建新人格。"""
 
-        if not self._has_permission(event, manage_operation=True):
-            yield event.plain_result("此操作需要管理员权限。")
+        has_perm, err_msg = self.check_permission(event, "create")
+        if not has_perm:
+            yield event.plain_result(err_msg)
             return
 
         try:
@@ -616,53 +708,16 @@ class PersonaPlus(Star):
             return
 
         yield event.plain_result("请发送人格内容(文本消息或文本文件)")
-
-        @session_waiter(timeout=self.manage_wait_timeout)
-        async def create_waiter(
-            controller: SessionController, next_event: AstrMessageEvent
-        ) -> None:
-            try:
-                raw_text = await self._extract_persona_from_event(
-                    next_event, persona_id
-                )
-                system_prompt, begin_dialogs = self._parse_persona_payload(raw_text)
-                await self._create_persona(
-                    persona_id=persona_id,
-                    system_prompt=system_prompt,
-                    begin_dialogs=begin_dialogs,
-                    tools=None,
-                )
-            except ValueError as exc:
-                await next_event.send(next_event.plain_result(f"创建失败：{exc}"))
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("创建人格时出现异常")
-                await next_event.send(next_event.plain_result(f"创建失败：{exc}"))
-            else:
-                await next_event.send(
-                    next_event.plain_result(f"人格 {persona_id} 创建成功。")
-                )
-            finally:
-                controller.stop()
-
-        async def wait_for_create() -> None:
-            try:
-                await create_waiter(event)
-            except TimeoutError:
-                await event.send(event.plain_result("等待人格内容超时，操作已取消。"))
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("创建人格等待流程异常")
-                await event.send(event.plain_result(f"创建流程异常：{exc}"))
-
-        asyncio.create_task(wait_for_create())
-        event.stop_event()
+        self._schedule_persona_wait(event, persona_id, "create")
         return
 
     @persona_plus.command("avatar")
     async def cmd_avatar(self, event: AstrMessageEvent, persona_id: str):
         """上传或更新人格头像。"""
 
-        if not self._has_permission(event, manage_operation=True):
-            yield event.plain_result("此操作需要管理员权限。")
+        has_perm, err_msg = self.check_permission(event, "avatar")
+        if not has_perm:
+            yield event.plain_result(err_msg)
             return
 
         try:
@@ -672,45 +727,16 @@ class PersonaPlus(Star):
             return
 
         yield event.plain_result("请发送人格头像图片")
-
-        @session_waiter(timeout=self.manage_wait_timeout)
-        async def avatar_waiter(
-            controller: SessionController, next_event: AstrMessageEvent
-        ) -> None:
-            try:
-                await self.qq_sync.save_avatar_from_event(next_event, persona_id)
-            except ValueError as exc:
-                await next_event.send(next_event.plain_result(f"头像上传失败：{exc}"))
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("上传人格头像时出现异常")
-                await next_event.send(next_event.plain_result(f"头像上传失败：{exc}"))
-            else:
-                self.qq_sync.reset_persona_cache(persona_id)
-                await next_event.send(
-                    next_event.plain_result(f"人格 {persona_id} 头像上传成功。")
-                )
-            finally:
-                controller.stop()
-
-        async def wait_for_avatar() -> None:
-            try:
-                await avatar_waiter(event)
-            except TimeoutError:
-                await event.send(event.plain_result("等待头像图片超时，操作已取消。"))
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("上传头像等待流程异常")
-                await event.send(event.plain_result(f"头像上传流程异常：{exc}"))
-
-        asyncio.create_task(wait_for_avatar())
-        event.stop_event()
+        self._schedule_persona_wait(event, persona_id, "avatar")
         return
 
     @persona_plus.command("update")
     async def cmd_update(self, event: AstrMessageEvent, persona_id: str):
         """更新现有人格，使用下一条消息提供内容。"""
 
-        if not self._has_permission(event, manage_operation=True):
-            yield event.plain_result("此操作需要管理员权限。")
+        has_perm, err_msg = self.check_permission(event, "update")
+        if not has_perm:
+            yield event.plain_result(err_msg)
             return
 
         try:
@@ -720,44 +746,7 @@ class PersonaPlus(Star):
             return
 
         yield event.plain_result("请发送新的人格内容(文本消息或文本文件)")
-
-        @session_waiter(timeout=self.manage_wait_timeout)
-        async def update_waiter(
-            controller: SessionController, next_event: AstrMessageEvent
-        ) -> None:
-            try:
-                raw_text = await self._extract_persona_from_event(
-                    next_event, persona_id
-                )
-                system_prompt, begin_dialogs = self._parse_persona_payload(raw_text)
-                await self.persona_mgr.update_persona(
-                    persona_id=persona_id,
-                    system_prompt=system_prompt,
-                    begin_dialogs=begin_dialogs if begin_dialogs else None,
-                )
-            except ValueError as exc:
-                await next_event.send(next_event.plain_result(f"更新失败：{exc}"))
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("更新人格时出现异常")
-                await next_event.send(next_event.plain_result(f"更新失败：{exc}"))
-            else:
-                await next_event.send(
-                    next_event.plain_result(f"人格 {persona_id} 更新成功。")
-                )
-            finally:
-                controller.stop()
-
-        async def wait_for_update() -> None:
-            try:
-                await update_waiter(event)
-            except TimeoutError:
-                await event.send(event.plain_result("等待人格内容超时，操作已取消。"))
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("更新人格等待流程异常")
-                await event.send(event.plain_result(f"更新流程异常：{exc}"))
-
-        asyncio.create_task(wait_for_update())
-        event.stop_event()
+        self._schedule_persona_wait(event, persona_id, "update")
         return
 
     # ==================== 自动切换监听 ====================

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
-from typing import Optional
 
 import aiofiles
 import aiohttp
@@ -30,7 +30,7 @@ class QQProfileSync:
         )
         self.avatar_dir.mkdir(parents=True, exist_ok=True)
 
-    def load_config(self, config: Optional[AstrBotConfig]) -> None:
+    def load_config(self, config: AstrBotConfig | None) -> None:
         if not config:
             self.sync_nickname = True
             self.sync_avatar = False
@@ -79,7 +79,7 @@ class QQProfileSync:
 
     def extract_image_component(
         self, event: AstrMessageEvent
-    ) -> Optional[Comp.BaseMessageComponent]:
+    ) -> Comp.BaseMessageComponent | None:
         for component in event.get_messages():
             if isinstance(component, (Comp.Image, Comp.File)):
                 return component
@@ -184,7 +184,7 @@ class QQProfileSync:
             if avatar_path.exists():
                 if hasattr(event.bot, "set_qq_avatar"):
                     try:
-                        await event.bot.set_qq_avatar(file=str(avatar_path))
+                        await self._apply_qq_avatar(event, avatar_path)
                         logger.debug("Persona+ 已同步头像 %s", avatar_path.as_posix())
                         avatar_synced = True
                     except Exception as exc:  # noqa: BLE001
@@ -200,6 +200,31 @@ class QQProfileSync:
 
         if nickname_applied or avatar_synced:
             self._last_synced_persona[bot_key] = persona_id
+
+    async def _apply_qq_avatar(
+        self, event: AiocqhttpMessageEvent, avatar_path: Path
+    ) -> None:
+        """尝试以 file:// 路径同步头像，失败则回退为 base64 方案。
+
+        - 优先使用 file URL：file:///E:/.../avatar.jpg（使用正斜杠，兼容 Windows）
+        - 回退使用 base64：base64://<encoded>
+        """
+        # 方案一：file URL（避免反斜杠与非 ASCII 路径问题）
+        file_url = f"file:///{avatar_path.resolve().as_posix()}"
+        try:
+            await event.bot.set_qq_avatar(file=file_url)
+            return
+        except Exception as first_exc:  # noqa: BLE001
+            logger.debug(
+                "Persona+ 使用 file URL 同步头像失败，准备回退 base64。错误：%s",
+                first_exc,
+            )
+
+        # 方案二：base64
+        async with aiofiles.open(avatar_path, "rb") as f:
+            data = await f.read()
+        encoded = base64.b64encode(data).decode("ascii")
+        await event.bot.set_qq_avatar(file=f"base64://{encoded}")
 
     async def _sync_qq_profile(
         self, event: AiocqhttpMessageEvent, nickname: str

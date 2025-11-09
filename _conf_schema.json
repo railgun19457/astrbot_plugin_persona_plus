@@ -28,11 +28,11 @@
     "type": "int",
     "default": 60
   },
-  "require_admin_for_manage": {
-    "description": "人格管理需管理员",
-    "hint": "启用后，创建/更新/删除人格指令仅管理员可用",
-    "type": "bool",
-    "default": true
+  "admin_commands": {
+    "description": "需要管理员权限的指令列表",
+    "hint": "在此列表中的指令需要管理员权限执行。可选值: switch, create, update, delete, view, list, help, avatar",
+    "type": "list",
+    "default": ["switch", "create", "update", "delete", "view", "avatar"]
   },
   "enable_auto_switch_announce": {
     "description": "切换提示",
@@ -73,6 +73,6 @@
     "description": "昵称模板",
     "hint": "更改昵称时使用的模板，支持 {persona_id}(人格ID) 占位符",
     "type": "string",
-    "default": "{persona_id}"
+    "default": "[B0T]{persona_id}"
   }
 }

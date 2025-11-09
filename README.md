@@ -2,13 +2,14 @@
 
 ![:name](https://count.getloli.com/@astrbot_plugin_persona_plus?name=astrbot_plugin_persona_plus&theme=miku&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
 
-#### 扩展 AstrBot 的人格管理能力，提供人格管理(包括创建、删除、更新等功能)、关键词自动切换、快速切换人格、以及与 QQ 头像/昵称的同步修改。
+### 使用指令管理人格(支持切换、创建、查看、更新、删除)、设置关键词自动切换、QQ头像/昵称 同步切换
 
+***
 ### 主要特性
-- 使用命令直接 创建/更新 人格
+- 使用指令直接 创建/更新/删除/查看 人格
 - 基于关键词的自动切换
 - 支持为人格上传头像，并在切换人格时同步切换QQ昵称和头像
-- 切换人格时可选择清空当前会话上下文
+- 切换人格时可选择自动清空当前会话上下文
 
 ### 命令
 (命令组：`/persona_plus`，别名：`/pp`、`/persona+`)
@@ -55,9 +56,10 @@
   - 默认：`60`
   
 
-- 人格管理需管理员(require_admin_for_manage)
-  - 是否需要管理员权限才能执行创建/更新/删除等管理操作。
-  - 默认: true
+- 需要管理员权限的指令列表(admin_commands)
+  - 在此列表中的指令需要管理员权限执行。可选值: switch, create, update, delete, view, list, help, avatar
+  - 默认:"switch", "create", "update", "delete", "view", "avatar"
+  - 其中switch为快速切换
 
 - 切换提示(enable_auto_switch_announce)
   - 切换人格时，是否发送提示
@@ -84,14 +86,20 @@
 - 昵称模板(nickname_template)
   - 昵称/群名片模板，支持 `{persona_id}` 占位符。
     - 例如：`"[Bot]{persona_id}"` 会将人格 ID 为 "测试" 的昵称设置为 `"[Bot]测试"`
-  - 默认: "{persona_id}"
+  - 默认: "[B0T]{persona_id}"
 
 
 ### 更新日志
 #### ToDo
   - [x] 从文件解析人设
   - [ ] 提供tool，让ai可以直接创建/修改人格
-  
+
+#### v1.3
+  - 细化权限管理，可针对每一个指令设置权限，统一权限验证
+  - 优化代码，减少重复逻辑
+  - 修复 windows下无法修改头像的问题，使用base64和file url传输图片
+  - 修复 手机对话时，无法正常创建、更新人格的问题（过滤"对方正在输入中"的输入状态）
+
 #### v1.2
   - 从文本文件解析人设
   
