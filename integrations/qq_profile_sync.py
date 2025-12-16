@@ -22,8 +22,8 @@ class QQProfileSync:
         self.enabled: bool = False
         self.sync_nickname: bool = True
         self.sync_avatar: bool = False
-        self.nickname_sync_mode: str = "profile"  # profile, group_card, hybrid
-        self.nickname_template: str = "{persona_id}"
+        self.nickname_sync_mode: str = "group_card"  # profile, group_card, hybrid
+        self.nickname_template: str = "[B0T]{persona_id}"
         self._last_synced_persona: dict[str, str] = {}
         self.avatar_dir: Path = (
             StarTools.get_data_dir("astrbot_plugin_persona_plus") / "avatars"
@@ -34,9 +34,9 @@ class QQProfileSync:
         if not config:
             self.sync_nickname = True
             self.sync_avatar = False
-            self.nickname_sync_mode = "profile"
+            self.nickname_sync_mode = "group_card"
             self.enabled = self.sync_nickname or self.sync_avatar
-            self.nickname_template = "{persona_id}"
+            self.nickname_template = "[B0T]{persona_id}"
             return
 
         self.sync_nickname = config.get("sync_nickname_on_switch", True)
@@ -164,16 +164,12 @@ class QQProfileSync:
         if sync_nickname:
             nickname = self.format_nickname(persona_id)
 
-            # 根据模式决定同步策略
             if self.nickname_sync_mode == "profile":
-                # 只修改 QQ 昵称
                 nickname_applied = await self._sync_qq_profile(event, nickname)
             elif self.nickname_sync_mode == "group_card":
-                # 群聊中只修改群名片，私聊不修改
                 if is_group:
                     nickname_applied = await self._sync_group_card(event, nickname)
             elif self.nickname_sync_mode == "hybrid":
-                # 群聊中修改群名片，私聊中修改 QQ 昵称
                 if is_group:
                     nickname_applied = await self._sync_group_card(event, nickname)
                 else:
@@ -204,12 +200,6 @@ class QQProfileSync:
     async def _apply_qq_avatar(
         self, event: AiocqhttpMessageEvent, avatar_path: Path
     ) -> None:
-        """尝试以 file:// 路径同步头像，失败则回退为 base64 方案。
-
-        - 优先使用 file URL：file:///E:/.../avatar.jpg（使用正斜杠，兼容 Windows）
-        - 回退使用 base64：base64://<encoded>
-        """
-        # 方案一：file URL（避免反斜杠与非 ASCII 路径问题）
         file_url = f"file:///{avatar_path.resolve().as_posix()}"
         try:
             await event.bot.set_qq_avatar(file=file_url)
@@ -220,7 +210,6 @@ class QQProfileSync:
                 first_exc,
             )
 
-        # 方案二：base64
         async with aiofiles.open(avatar_path, "rb") as f:
             data = await f.read()
         encoded = base64.b64encode(data).decode("ascii")
@@ -229,7 +218,6 @@ class QQProfileSync:
     async def _sync_qq_profile(
         self, event: AiocqhttpMessageEvent, nickname: str
     ) -> bool:
-        """同步 QQ 昵称"""
         if hasattr(event.bot, "set_qq_profile"):
             try:
                 await event.bot.set_qq_profile(nickname=nickname)
@@ -244,7 +232,6 @@ class QQProfileSync:
         return False
 
     async def _sync_group_card(self, event: AiocqhttpMessageEvent, card: str) -> bool:
-        """同步群名片"""
         group_id = event.get_group_id()
         if not group_id:
             return False
