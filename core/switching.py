@@ -75,6 +75,10 @@ async def switch_persona(
         history=history_reset,
     )
 
+    # 如果清除了上下文，同时清除长期记忆（LTM）
+    if clear_context_on_switch:
+        event.set_extra("_clean_ltm_session", True)
+
     if scope == "conversation":
         logger.info("Persona+ 已切换会话人格至 %s (scope=%s)", persona_id, scope)
     elif scope in {"session", "global"}:
